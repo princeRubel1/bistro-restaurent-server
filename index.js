@@ -3,6 +3,7 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const app = express();
 require("dotenv").config();
+const stripe = require("stripe")(process.env.PAYMENT_SECRET_KEY);
 const port = process.env.PORT || 4000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
@@ -53,6 +54,7 @@ async function run() {
     const reviewCollection = client.db("bistroDb").collection("reviews");
     const cartCollection = client.db("bistroDb").collection("carts");
     const bookingCollection = client.db("bistroDb").collection("bookings");
+    const paymentCollection = client.db("bistroDb").collection("payments");
     // iwt token
     app.post("/jwt", (req, res) => {
       const user = req.body;
@@ -136,6 +138,13 @@ async function run() {
       const result = await menuCollection.insertOne(newItem);
       res.send(result);
     });
+    // delete for menu
+    app.delete("/menu/:id", verifyJWT, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.deleteOne(query);
+      res.send(result);
+    });
     // review related api
     app.get("/reviews", async (req, res) => {
       const result = await reviewCollection.find().toArray();
@@ -148,6 +157,14 @@ async function run() {
       const result = await reviewCollection.insertOne(newReview);
       res.send(result);
     });
+    // add reservation api
+    app.post("/bookings", async (req, res) => {
+      const newBooking = req.body;
+      // console.log(newBooking);
+      const result = await bookingCollection.insertOne(newBooking);
+      res.send(result);
+    });
+
     // cart collection api
     app.get("/carts", verifyJWT, async (req, res) => {
       const email = req.query.email;
@@ -178,11 +195,90 @@ async function run() {
       res.send(result);
     });
     //  booking related api
-    app.post("/bookings", async (req, res) => {
-      const newBooking = req.body;
-      console.log(newBooking);
-      const result = await bookingCollection.insertOne(newBooking);
+
+    app.post("/create-payment-intent", verifyJWT, async (req, res) => {
+      const { price } = req.body;
+
+      const amount = parseInt(price * 100);
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: "usd",
+        payment_method_types: ["card"],
+      });
+      res.send({
+        clientSecret: paymentIntent.client_secret,
+      });
+    });
+
+    // payment related api
+    app.post("/payments", verifyJWT, async (req, res) => {
+      const payment = req.body;
+      const insertResult = await paymentCollection.insertOne(payment);
+
+      const query = {
+        _id: { $in: payment.cartItems.map((id) => new ObjectId(id)) },
+      };
+      const deleteResult = await cartCollection.deleteMany(query);
+
+      res.send({ insertResult, deleteResult });
+    });
+    // for payment history api
+    app.get("/payments", async (req, res) => {
+      const result = await paymentCollection.find().toArray();
       res.send(result);
+    });
+    // admin chart
+    // app.get("/order-stats", async (req, res) => {
+    //   const pipeline = [
+    //     {
+    //       $lookup: {
+    //         from: "menu",
+    //         localField: "menuItems",
+    //         foreignField: "_id",
+    //         as: "menuItemsData",
+    //       },
+    //     },
+    //     {
+    //       $unwind: "$menuItemsData",
+    //     },
+    //     {
+    //       $group: {
+    //         _id: "$menuItemsData.category",
+    //         count: { $sum: 1 },
+    //         total: { $sum: "$menuItemsData.price" },
+    //       },
+    //     },
+    //     {
+    //       $project: {
+    //         category: "$_id",
+    //         count: 1,
+    //         total: { $round: ["$total", 2] },
+    //         _id: 0,
+    //       },
+    //     },
+    //   ];
+    //   // console.log(pipeline);
+    //   const result = await paymentCollection.aggregate(pipeline).toArray();
+    //   res.send(result);
+    // });
+    // for admin home api
+    app.get("/admin-stats", verifyJWT, verifyAdmin, async (req, res) => {
+      const users = await userCollection.estimatedDocumentCount();
+      const products = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      // best way to get some of the price filed use to group and sum operator
+
+      const payments = await paymentCollection.find().toArray();
+      const revenue = payments.reduce((sum, payment) => sum + payment.price, 0);
+
+      res.send({
+        users,
+        products,
+        orders,
+        revenue,
+      });
     });
 
     // Send a ping to confirm a successful connection
